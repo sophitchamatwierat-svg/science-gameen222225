@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AR Science Game: Living vs Non-Living</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Prompt', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+            color: white;
+            touch-action: none; /* ป้องกันการเลื่อนหน้าจอเวลาลากไอเทม */
+        }
+
+        /* Glassmorphism Classes */
+        .glass {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+
+        .glass-panel {
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        /* Video & Canvas Overlay */
+        #video-element {
+            display: none; /* ซ่อนวิดีโอต้นฉบับ จะวาดลง Canvas แทน */
+        }
+
+        #output-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 10;
+            /* พลิกภาพแนวนอนเพื่อให้เป็นกระจกสะท้อน (Mirror) */
+            transform: scaleX(-1);
+        }
+
+        /* UI Layer */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 20;
+            pointer-events: none; /* ให้คลิกทะลุไปหาไอเทมได้ */
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        /* Interactive Items */
+        .game-item {
+            pointer-events: auto;
+            cursor: grab;
+            user-select: none;
+            transition: transform 0.1s;
+        }
+        .game-item:active {
+            cursor: grabbing;
+        }
+        .dragging {
+            position: fixed !important;
+            z-index: 50;
+            transform: scale(1.2);
+            pointer-events: none; /* ระหว่างลากไม่ให้บล็อก Event */
+        }
+
+        /* Animations */
+        @keyframes shake {
+            0% { transform: translate(1px, 1px) rotate(0deg); }
+            10% { transform: translate(-1px, -2px) rotate(-1deg); }
+            20% { transform: translate(-3px, 0px) rotate(1deg); }
+            30% { transform: translate(3px, 2px) rotate(0deg); }
+            40% { transform: translate(1px, -1px) rotate(1deg); }
+            50% { transform: translate(-1px, 2px) rotate(-1deg); }
+            60% { transform: translate(-3px, 1px) rotate(0deg); }
+            70% { transform: translate(3px, 1px) rotate(-1deg); }
+            80% { transform: translate(-1px, -1px) rotate(1deg); }
+            90% { transform: translate(1px, 2px) rotate(0deg); }
+            100% { transform: translate(1px, -2px) rotate(-1deg); }
+        }
+        .animate-shake {
+            animation: shake 0.5s;
+            animation-iteration-count: 1;
+        }
+
+        @keyframes popIn {
+            0% { transform: scale(0); opacity: 0; }
+            80% { transform: scale(1.1); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-pop-in {
+            animation: popIn 0.4s ease-out forwards;
+        }
+
+        /* Target Baskets */
+        .basket {
+            pointer-events: auto;
+            transition: all 0.2s;
+        }
+        .basket.highlight {
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Video element สำหรับ MediaPipe (ซ่อนไว้) -->
+    <video id="video-element" autoplay playsinline></video>
+    
+    <!-- Canvas สำหรับวาด Video, Skeleton และ Particles -->
+    <canvas id="output-canvas"></canvas>
+
+    <!-- UI Layer -->
+    <div id="ui-layer">
+        
+        <!-- HUD (Head-Up Display) -->
+        <div class="p-4 flex justify-between items-start w-full pointer-events-auto">
+            <!-- Level & Score -->
+            <div class="glass rounded-xl p-3 flex flex-col gap-1 w-48">
+                <div class="text-sm font-bold text-blue-300 uppercase tracking-wide">Level <span id="ui-level">1</span>/3</div>
+                <div class="text-2xl font-bold flex justify-between">
+                    <span>Score:</span> <span id="ui-score" class="text-green-400">0</span>
+                </div>
+                <div class="text-sm text-yellow-300 font-semibold" id="ui-combo-container" style="display: none;">
+                    🔥 Combo x<span id="ui-combo">1</span>
+                </div>
+            </div>
+
+            <!-- Timer & FPS -->
+            <div class="flex flex-col items-end gap-2">
+                <div class="glass rounded-xl p-3 text-xl font-bold flex items-center gap-2">
+                    ⏱️ <span id="ui-time">00:00</span>
+                </div>
+                <div class="text-xs bg-black bg-opacity-50 rounded px-2 py-1 text-gray-300">
+                    FPS: <span id="ui-fps">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Spawning Area สำหรับไอเทมตรงกลางจอ -->
+        <div id="item-spawn-area" class="flex-1 flex justify-center items-center flex-wrap gap-6 p-4 w-full pointer-events-none relative z-30">
+            <!-- Items จะถูกสร้างที่นี่ผ่าน JS -->
+        </div>
+
+        <!-- Target Baskets (โซนวางไอเทม) -->
+        <div class="w-full flex justify-between px-4 pb-8 md:px-12 md:pb-12 h-40">
+            <!-- ตะกร้า: สิ่งมีชีวิต -->
+            <div id="basket-living" class="basket glass rounded-3xl w-5/12 max-w-xs flex flex-col justify-center items-center border-green-400 border-2 bg-green-900 bg-opacity-30 relative overflow-hidden group">
+                <div class="text-4xl md:text-6xl mb-2 pointer-events-none">🌿</div>
+                <div class="font-bold text-lg md:text-xl text-green-300 text-center shadow-black pointer-events-none">สิ่งมีชีวิต</div>
+                <div class="text-xs text-center text-gray-300 mt-1 hidden md:block pointer-events-none">หายใจ เติบโต ขับถ่ายได้</div>
+            </div>
+
+            <!-- ตะกร้า: สิ่งไม่มีชีวิต -->
+            <div id="basket-nonliving" class="basket glass rounded-3xl w-5/12 max-w-xs flex flex-col justify-center items-center border-gray-400 border-2 bg-gray-800 bg-opacity-40 relative overflow-hidden group">
+                <div class="mb-2 pointer-events-none"><img src="https://lh3.googleusercontent.com/d/10UEQAu7HKBb0NIo4THOvmp_LFtwgio1z" referrerpolicy="no-referrer" alt="สิ่งไม่มีชีวิต" class="w-12 h-12 md:w-16 md:h-16 object-contain filter drop-shadow-md"></div>
+                <div class="font-bold text-lg md:text-xl text-gray-300 text-center shadow-black pointer-events-none">สิ่งไม่มีชีวิต</div>
+                <div class="text-xs text-center text-gray-400 mt-1 hidden md:block pointer-events-none">ไม่เติบโต ไม่หายใจ</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Start Menu -->
+    <div id="start-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm">
+        <div class="glass-panel p-8 rounded-2xl max-w-lg w-[90%] text-center border-t-4 border-blue-500 animate-pop-in">
+            <h1 class="text-3xl md:text-4xl font-bold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-green-400">AR Science Lab</h1>
+            <h2 class="text-xl mb-6 text-gray-300">ตอน: สิ่งมีชีวิต vs สิ่งไม่มีชีวิต</h2>
+            
+            <div class="text-sm text-gray-400 mb-8 space-y-2 text-left bg-black bg-opacity-30 p-4 rounded-xl">
+                <p>🎮 <b>วิธีเล่น:</b></p>
+                <p>1. เปิดกล้อง Webcam และชูมือขึ้นมา</p>
+                <p>2. ใช้ <b>นิ้วโป้ง และ นิ้วชี้ หนีบเข้าหากัน (Pinch)</b> เพื่อจับไอเทม</p>
+                <p>3. ลากไอเทมไปใส่ตระกร้าให้ถูกต้อง</p>
+                <p class="text-yellow-400 text-xs mt-2">* หากไม่มีกล้อง สามารถใช้เมาส์หรือนิ้วแตะลากได้เลย</p>
+            </div>
+
+            <button id="btn-start" class="bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700 text-white font-bold py-3 px-8 rounded-full text-xl shadow-lg transition-transform transform hover:scale-105 active:scale-95">
+                เริ่มการทดลอง 🚀
+            </button>
+        </div>
+    </div>
+
+    <!-- Modal: Explanation (เมื่อตอบถูก) -->
+    <div id="info-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 hidden">
+        <div class="glass p-6 rounded-2xl max-w-md w-[85%] text-center border-2 border-green-400 animate-pop-in shadow-green-500/50 shadow-2xl bg-green-900 bg-opacity-90">
+            <div class="text-6xl mb-4" id="info-icon">🟢</div>
+            <h2 class="text-2xl font-bold mb-2 text-white" id="info-title">ถูกต้อง!</h2>
+            <p class="text-lg text-green-200 mb-6" id="info-desc">คำอธิบาย</p>
+            <button id="btn-next-item" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-full shadow-lg transition-transform transform hover:scale-105">
+                เข้าใจแล้ว 👍
+            </button>
+        </div>
+    </div>
+
+    <!-- Modal: Game Over / Victory -->
+    <div id="result-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-90 hidden backdrop-blur-md">
+        <div class="glass-panel p-8 rounded-3xl max-w-md w-[90%] text-center border-t-4 border-yellow-400 animate-pop-in">
+            <h1 class="text-4xl font-bold mb-2">🎉 ยินดีด้วย! 🎉</h1>
+            <h2 class="text-xl text-gray-300 mb-6">คุณผ่านการทดสอบทั้งหมดแล้ว</h2>
+            
+            <div class="flex justify-center gap-2 mb-4 text-4xl" id="result-stars">
+                <!-- Stars will be injected here -->
+            </div>
+
+            <div class="bg-black bg-opacity-40 rounded-xl p-4 mb-6">
+                <div class="flex justify-between mb-2"><span class="text-gray-400">คะแนนรวม:</span> <span class="font-bold text-green-400 text-xl" id="result-score">0</span></div>
+                <div class="flex justify-between mb-2"><span class="text-gray-400">เวลาที่ใช้:</span> <span class="font-bold text-blue-300" id="result-time">00:00</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">ฉายา:</span> <span class="font-bold text-purple-400" id="result-title">นักวิทย์น้อย</span></div>
+            </div>
+
+            <button id="btn-restart" class="w-full bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-white font-bold py-3 px-8 rounded-full text-lg shadow-lg transition-transform transform hover:scale-105 active:scale-95">
+                เล่นอีกครั้ง 🔄
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // === 1. Game Data (โครงสร้างข้อมูลเกม) ===
+        const levelsData = [
+            {
+                level: 1,
+                items: [
+                    { id: 'dog', name: 'สุนัข', emoji: '🐶', type: 'living', desc: 'สุนัขต้องการอาหาร เจริญเติบโตได้ และตอบสนองต่อสิ่งเร้าได้' },
+                    { id: 'tree', name: 'ต้นไม้', emoji: '🌳', type: 'living', desc: 'ต้นไม้หายใจได้ เจริญเติบโตได้ สร้างอาหารเองได้ และสืบพันธุ์ได้' },
+                    { id: 'car', name: 'รถยนต์', emoji: '🚗', type: 'nonliving', desc: 'รถยนต์เคลื่อนที่ได้แต่ต้องใช้พลังงาน ไม่มีการเจริญเติบโต และไม่หายใจ' },
+                    { id: 'rock', name: 'ก้อนหิน', image: 'https://lh3.googleusercontent.com/d/1sgpxl7mXV0hACmrn_K32OE4jEP4ix7Gl', type: 'nonliving', desc: 'ก้อนหินไม่หายใจ ไม่ต้องการอาหาร และไม่มีการเจริญเติบโต' }
+                ]
+            },
+            {
+                level: 2,
+                items: [
+                    { id: 'coral', name: 'ปะการัง', image: 'https://lh3.googleusercontent.com/d/1l6GdM2wihsHjZ-Uw_u0Elo9zcwOzKHGE', type: 'living', desc: 'ปะการังเป็นสัตว์ทะเล! มีการกินอาหาร เจริญเติบโต และสืบพันธุ์ได้' },
+                    { id: 'mushroom', name: 'เห็ด', emoji: '🍄', type: 'living', desc: 'เห็ดหายใจและเจริญเติบโตได้ เป็นสิ่งมีชีวิตประเภทกลุ่มรา (Fungi)' },
+                    { id: 'robot', name: 'หุ่นยนต์', emoji: '🤖', type: 'nonliving', desc: 'ทำงานตามโปรแกรมที่มนุษย์สร้าง ไม่มีความรู้สึก และไม่เจริญเติบโต' },
+                    { id: 'cloud', name: 'ก้อนเมฆ', emoji: '☁️', type: 'nonliving', desc: 'เปลี่ยนรูปร่างและเคลื่อนที่ตามลมได้ แต่ไม่มีเซลล์ ไม่หายใจ' }
+                ]
+            },
+            {
+                level: 3,
+                items: [
+                    { id: 'seed', name: 'เมล็ดพืช', image: 'https://lh3.googleusercontent.com/d/1HZkHnaaIMmwfH3ldnWhVsLHUsL3FloqG', type: 'living', desc: 'เมล็ดคือพืชในระยะพักตัว สามารถงอกและเจริญเติบโตเป็นต้นใหม่ได้เมื่อได้น้ำ' },
+                    { id: 'bacteria', name: 'เชื้อแบคทีเรีย', emoji: '🦠', type: 'living', desc: 'สิ่งมีชีวิตขนาดเล็กเซลล์เดียว มีการกินอาหาร สืบพันธุ์เพิ่มจำนวนได้' },
+                    { id: 'water', name: 'น้ำ', emoji: '💧', type: 'nonliving', desc: 'น้ำจำเป็นต่อสิ่งมีชีวิตมาก แต่ตัวน้ำเองไม่มีเซลล์ ไม่หายใจ ไม่สืบพันธุ์' },
+                    { id: 'phone', name: 'โทรศัพท์', emoji: '📱', type: 'nonliving', desc: 'มีระบบตอบสนองด้วยไฟฟ้า แต่ไม่มีชีวิต ไม่เจริญเติบโต และสืบพันธุ์ไม่ได้' }
+                ]
+            }
+        ];
+
+        // === 2. Global State Variables ===
+        let gameState = 'start'; // 'start', 'playing', 'info', 'gameover'
+        let currentLevel = 0;
+        let score = 0;
+        let combo = 0;
+        let maxCombo = 0;
+        let timeSeconds = 0;
+        let timerInterval = null;
+        let activeItems = []; // ไอเทมที่อยู่ในฉาก
+        
+        // ตัวแปรสำหรับระบบ Interaction
+        let draggedElement = null;
+        let dragOffsetX = 0;
+        let dragOffsetY = 0;
+        let isUsingHand = false; // Flag เช็คว่าลากด้วยมือ(AR) หรือเมาส์/สัมผัส
+
+        // ตัวแปรสำหรับ MediaPipe & Canvas
+        const videoElement = document.getElementById('video-element');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        let camera = null;
+        let hands = null;
+        let latestHandResults = null;
+        let handCursor = { x: 0, y: 0, isPinching: false, mappedX: 0, mappedY: 0 };
+        const PINCH_THRESHOLD = 0.06; // ระยะห่างที่ถือว่าหนีบนิ้ว
+        
+        // FPS Calculation
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+        let fps = 0;
+
+        // Particle System
+        let particles = [];
+
+        // DOM Elements References
+        const uiLevel = document.getElementById('ui-level');
+        const uiScore = document.getElementById('ui-score');
+        const uiCombo = document.getElementById('ui-combo');
+        const uiComboContainer = document.getElementById('ui-combo-container');
+        const uiTime = document.getElementById('ui-time');
+        const uiFps = document.getElementById('ui-fps');
+        const itemSpawnArea = document.getElementById('item-spawn-area');
+        
+        const basketLiving = document.getElementById('basket-living');
+        const basketNonLiving = document.getElementById('basket-nonliving');
+        
+        const startModal = document.getElementById('start-modal');
+        const infoModal = document.getElementById('info-modal');
+        const resultModal = document.getElementById('result-modal');
+
+        // === 3. Core Functions ===
+
+        // สุ่มเรียง Array (Fisher-Yates Shuffle)
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+
+        // จัดการเวลา
+        function updateTimer() {
+            if (gameState !== 'playing') return;
+            timeSeconds++;
+            const mins = String(Math.floor(timeSeconds / 60)).padStart(2, '0');
+            const secs = String(timeSeconds % 60).padStart(2, '0');
+            uiTime.textContent = `${mins}:${secs}`;
+        }
+
+        // เริ่มเกม
+        function startGame() {
+            startModal.classList.add('hidden');
+            resultModal.classList.add('hidden');
+            
+            // รีเซ็ตค่า
+            currentLevel = 0;
+            score = 0;
+            combo = 0;
+            maxCombo = 0;
+            timeSeconds = 0;
+            updateScoreUI();
+            uiTime.textContent = "00:00";
+            
+            // เริ่มเวลา
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(updateTimer, 1000);
+            
+            // ตั้งค่ากล้องถ้ายังไม่ได้ตั้ง
+            if (!camera) {
+                initMediaPipe();
+            }
+
+            gameState = 'playing';
+            loadLevel();
+        }
+
+        // โหลดด่านใหม่
+        function loadLevel() {
+            if (currentLevel >= levelsData.length) {
+                endGame();
+                return;
+            }
+
+            uiLevel.textContent = currentLevel + 1;
+            itemSpawnArea.innerHTML = '';
+            
+            // ดึงข้อมูลไอเทมและสุ่มลำดับ
+            const levelData = levelsData[currentLevel];
+            activeItems = shuffleArray([...levelData.items]);
+
+            // สร้าง DOM Element สำหรับไอเทมแต่ละชิ้น
+            activeItems.forEach(item => {
+                const el = document.createElement('div');
+                el.className = 'game-item glass pointer-events-auto flex flex-col justify-center items-center w-24 h-24 md:w-32 md:h-32 rounded-2xl bg-white bg-opacity-20 animate-pop-in';
+                el.dataset.id = item.id;
+                el.dataset.type = item.type;
+                el.dataset.name = item.name;
+                el.dataset.desc = item.desc;
+                
+                // ตรวจสอบว่าไอเทมนี้ใช้รูปภาพ หรือ อีโมจิ (เพิ่ม referrerpolicy ป้องกัน Google Drive Block)
+                const visualContent = item.image
+                    ? `<img src="${item.image}" referrerpolicy="no-referrer" alt="${item.name}" class="w-12 h-12 md:w-16 md:h-16 object-contain filter drop-shadow-md pointer-events-none" onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\\'text-4xl md:text-6xl\\'>❓</div>';">`
+                    : `<div class="text-4xl md:text-6xl filter drop-shadow-md pointer-events-none">${item.emoji}</div>`;
+
+                el.innerHTML = `
+                    ${visualContent}
+                    <div class="text-sm md:text-md font-bold mt-2 shadow-black pointer-events-none">${item.name}</div>
+                `;
+
+                // ผูก Event สำหรับเมาส์และหน้าจอสัมผัส (Fallback System)
+                el.addEventListener('mousedown', onDragStart);
+                el.addEventListener('touchstart', onDragStart, {passive: false});
+                
+                itemSpawnArea.appendChild(el);
+            });
+        }
+
+        // ปรับปรุง UI คะแนน
+        function updateScoreUI() {
+            uiScore.textContent = score;
+            if (combo > 1) {
+                uiComboContainer.style.display = 'block';
+                uiCombo.textContent = combo;
+                // Animation กระตุกเล็กน้อยเมื่อคอมโบเพิ่ม
+                uiComboContainer.classList.remove('animate-pop-in');
+                void uiComboContainer.offsetWidth; // trigger reflow
+                uiComboContainer.classList.add('animate-pop-in');
+            } else {
+                uiComboContainer.style.display = 'none';
+            }
+        }
+
+        // === 4. Interaction Logic ===
+
+        // เมื่อเริ่มลาก (Mouse/Touch)
+        function onDragStart(e) {
+            if (gameState !== 'playing') return;
+            e.preventDefault(); // ป้องกันพฤติกรรมเริ่มต้นเช่น scroll
+            
+            isUsingHand = false; // บ่งบอกว่าใช้เมาส์/นิ้วสัมผัส
+            draggedElement = e.currentTarget;
+            
+            // หากำแหน่งสัมผัส
+            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+            
+            // คำนวณ Offset ให้จับตรงกลางหรือจุดที่คลิก
+            const rect = draggedElement.getBoundingClientRect();
+            dragOffsetX = clientX - rect.left;
+            dragOffsetY = clientY - rect.top;
+
+            // เปลี่ยน Style เพื่อให้ลอยเหนือทุกอย่าง
+            draggedElement.classList.add('dragging');
+            draggedElement.style.left = (clientX - dragOffsetX) + 'px';
+            draggedElement.style.top = (clientY - dragOffsetY) + 'px';
+
+            // เพิ่ม Global Listeners
+            if (e.type.includes('mouse')) {
+                window.addEventListener('mousemove', onDragMove);
+                window.addEventListener('mouseup', onDragEnd);
+            } else {
+                window.addEventListener('touchmove', onDragMove, {passive: false});
+                window.addEventListener('touchend', onDragEnd);
+            }
+        }
+
+        // ระหว่างลาก (Mouse/Touch)
+        function onDragMove(e) {
+            if (!draggedElement) return;
+            e.preventDefault();
+
+            const clientX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+            const clientY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+
+            draggedElement.style.left = (clientX - dragOffsetX) + 'px';
+            draggedElement.style.top = (clientY - dragOffsetY) + 'px';
+
+            checkHoveringBasket(clientX, clientY);
+        }
+
+        // เมื่อปล่อยลาก (Mouse/Touch)
+        function onDragEnd(e) {
+            if (!draggedElement) return;
+
+            const clientX = e.type.includes('mouse') ? e.clientX : e.changedTouches[0].clientX;
+            const clientY = e.type.includes('mouse') ? e.clientY : e.changedTouches[0].clientY;
+
+            // เอา Listeners ออก
+            window.removeEventListener('mousemove', onDragMove);
+            window.removeEventListener('mouseup', onDragEnd);
+            window.removeEventListener('touchmove', onDragMove);
+            window.removeEventListener('touchend', onDragEnd);
+
+            evaluateDrop(clientX, clientY, draggedElement);
+            
+            draggedElement = null;
+        }
+
+        // ตรวจสอบว่าลอยอยู่เหนือตระกร้าไหนเพื่อทำ Highlight
+        function checkHoveringBasket(x, y) {
+            const livingRect = basketLiving.getBoundingClientRect();
+            const nonLivingRect = basketNonLiving.getBoundingClientRect();
+
+            basketLiving.classList.remove('highlight', 'bg-opacity-70');
+            basketNonLiving.classList.remove('highlight', 'bg-opacity-70');
+
+            if (isInsideRect(x, y, livingRect)) {
+                basketLiving.classList.add('highlight', 'bg-opacity-70');
+            } else if (isInsideRect(x, y, nonLivingRect)) {
+                basketNonLiving.classList.add('highlight', 'bg-opacity-70');
+            }
+        }
+
+        // Helper เช็คว่าจุด x,y อยู่ใน Rect หรือไม่
+        function isInsideRect(x, y, rect) {
+            return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+        }
+
+        // ประเมินผลเมื่อปล่อยไอเทม
+        function evaluateDrop(x, y, element) {
+            element.classList.remove('dragging');
+            basketLiving.classList.remove('highlight', 'bg-opacity-70');
+            basketNonLiving.classList.remove('highlight', 'bg-opacity-70');
+
+            const itemType = element.dataset.type;
+            const livingRect = basketLiving.getBoundingClientRect();
+            const nonLivingRect = basketNonLiving.getBoundingClientRect();
+
+            let targetZone = null;
+            if (isInsideRect(x, y, livingRect)) targetZone = 'living';
+            else if (isInsideRect(x, y, nonLivingRect)) targetZone = 'nonliving';
+
+            if (targetZone) {
+                // วางในโซนใดโซนหนึ่ง
+                if (targetZone === itemType) {
+                    // ตอบถูก
+                    handleCorrectAnswer(element, x, y);
+                } else {
+                    // ตอบผิด
+                    handleWrongAnswer(element);
+                }
+            } else {
+                // ปล่อยนอกโซน ให้กลับไปจุดเกิดปกติ
+                element.style.position = '';
+                element.style.left = '';
+                element.style.top = '';
+            }
+        }
+
+        // จัดการเมื่อตอบถูก
+        function handleCorrectAnswer(element, x, y) {
+            // สร้าง Particles สีเขียว
+            createParticles(x, y, '#4ade80', 20);
+            
+            // คำนวณคะแนน
+            combo++;
+            if (combo > maxCombo) maxCombo = combo;
+            const pointsEarned = 10 * combo;
+            score += pointsEarned;
+            updateScoreUI();
+
+            // ลบ Element ออกจากฉาก
+            element.remove();
+            
+            // แสดง Popup อธิบาย
+            showInfoModal(true, element);
+
+            // เช็คว่าไอเทมหมดหรือยัง
+            if (itemSpawnArea.children.length === 0) {
+                currentLevel++;
+                // จะไปด่านต่อไปเมื่อปิด Modal
+            }
+        }
+
+        // จัดการเมื่อตอบผิด
+        function handleWrongAnswer(element) {
+            // Screen Shake Effect บน Container ของ Item
+            element.classList.add('animate-shake');
+            document.body.classList.add('animate-shake');
+            setTimeout(() => {
+                element.classList.remove('animate-shake');
+                document.body.classList.remove('animate-shake');
+            }, 500);
+
+            // สร้าง Particles สีแดง
+            const rect = element.getBoundingClientRect();
+            createParticles(rect.left + rect.width/2, rect.top + rect.height/2, '#ef4444', 10);
+
+            // รีเซ็ตตำแหน่ง
+            element.style.position = '';
+            element.style.left = '';
+            element.style.top = '';
+            
+            // หักคอมโบ
+            combo = 0;
+            updateScoreUI();
+        }
+
+        // แสดง Modal อธิบายวิทยาศาสตร์
+        function showInfoModal(isCorrect, element) {
+            gameState = 'info';
+            const titleEl = document.getElementById('info-title');
+            const descEl = document.getElementById('info-desc');
+            const iconEl = document.getElementById('info-icon');
+
+            if (isCorrect) {
+                iconEl.textContent = '🟢';
+                titleEl.textContent = `เยี่ยมมาก! ${element.dataset.name} คือ${element.dataset.type === 'living' ? 'สิ่งมีชีวิต' : 'สิ่งไม่มีชีวิต'}`;
+                titleEl.className = "text-2xl font-bold mb-2 text-green-300";
+            }
+            descEl.textContent = element.dataset.desc;
+            infoModal.classList.remove('hidden');
+        }
+
+        // ปิด Modal อธิบาย
+        document.getElementById('btn-next-item').addEventListener('click', () => {
+            infoModal.classList.add('hidden');
+            gameState = 'playing';
+            
+            // ถ้าไอเทมหมดแล้ว ให้โหลดด่านใหม่
+            if (itemSpawnArea.children.length === 0) {
+                loadLevel();
+            }
+        });
+
+        // จบเกมและแสดงผลรวม
+        function endGame() {
+            gameState = 'gameover';
+            if (timerInterval) clearInterval(timerInterval);
+
+            // คำนวณดาว (Stars)
+            // คะแนนเต็มสมมติฐาน: 12 ไอเทม * 10 คะแนน = 120 (ไม่รวมคอมโบ)
+            // ถ้ามีคอมโบ คะแนนจะสูงกว่านี้มาก
+            let stars = 1;
+            if (score > 150) stars = 3;
+            else if (score > 80) stars = 2;
+
+            // กำหนดฉายา
+            let title = "นักสำรวจฝึกหัด";
+            if (stars === 3) title = "นักวิทยาศาสตร์ระดับอัจฉริยะ 👑";
+            else if (stars === 2) title = "นักวิทย์น้อยผู้รอบรู้ 🌟";
+
+            // อัพเดท UI สรุปผล
+            document.getElementById('result-score').textContent = score;
+            document.getElementById('result-time').textContent = uiTime.textContent;
+            document.getElementById('result-title').textContent = title;
+            
+            let starHtml = '';
+            for(let i=0; i<3; i++) {
+                if (i < stars) starHtml += '⭐';
+                else starHtml += '<span class="opacity-30 grayscale">⭐</span>';
+            }
+            document.getElementById('result-stars').innerHTML = starHtml;
+
+            resultModal.classList.remove('hidden');
+        }
+
+        // === 5. MediaPipe & AR Setup ===
+
+        function initMediaPipe() {
+            // ตั้งค่าขนาด Canvas ให้ตรงกับหน้าจอ
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // สร้าง Instance ของ Hands
+            hands = new Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }
+            });
+
+            hands.setOptions({
+                maxNumHands: 1, // ใช้แค่มือเดียวเพื่อไม่ให้สับสน
+                modelComplexity: 1,
+                minDetectionConfidence: 0.7,
+                minTrackingConfidence: 0.7
+            });
+
+            hands.onResults(onMediaPipeResults);
+
+            // ตั้งค่า Camera
+            camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720
+            });
+
+            // ขอสิทธิ์เริ่มใช้งานกล้อง
+            camera.start().catch(err => {
+                console.warn("ไม่สามารถเปิดกล้องได้ เกมจะใช้โหมดเมาส์/สัมผัสแทน", err);
+                // Fallback ทำงานอัตโนมัติอยู่แล้วเพราะเราผูก Event Mouse/Touch ไว้ที่ Game Items
+            });
+
+            // เริ่ม Render Loop
+            requestAnimationFrame(drawLoop);
+        }
+
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+        }
+
+        // รับผลลัพธ์จาก MediaPipe (รันแบบ Asynchronous ตาม Frame กล้อง)
+        function onMediaPipeResults(results) {
+            latestHandResults = results;
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // ดึงจุดปลายนิ้วชี้ (Landmark 8) และ ปลายนิ้วโป้ง (Landmark 4)
+                const indexFinger = landmarks[8];
+                const thumb = landmarks[4];
+
+                // แปลงพิกัด (MediaPipe ค่า x,y อยู่ในช่วง 0-1)
+                // เนื่องจากเราพลิก Canvas แนวนอน (scaleX(-1)) ภาพที่เห็นคือกระจก
+                // พิกัด X ของมือในโลกจริง (บนจอ) จึงสอดคล้องกับ (1 - x) ใน data
+                // แต่เพื่อความง่ายในการ Map เข้า DOM เราจะใช้ x ที่ปรับตามกระจกแล้ว
+                const mirrorX = 1 - indexFinger.x;
+                
+                handCursor.mappedX = mirrorX * window.innerWidth;
+                handCursor.mappedY = indexFinger.y * window.innerHeight;
+
+                // คำนวณระยะห่างระหว่างนิ้วชี้กับนิ้วโป้ง เพื่อหาจังหวะ "Pinch / หนีบ"
+                const dx = indexFinger.x - thumb.x;
+                const dy = indexFinger.y - thumb.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                handCursor.isPinching = distance < PINCH_THRESHOLD;
+                
+                // นำค่าไปประมวลผลลอจิกจับไอเทมด้วย AR
+                processARInteraction();
+            } else {
+                handCursor.isPinching = false;
+                if (draggedElement && isUsingHand) {
+                    // หลุดโฟกัสมือ ปล่อยไอเทมทันที
+                    evaluateDrop(handCursor.mappedX, handCursor.mappedY, draggedElement);
+                    draggedElement = null;
+                }
+            }
+        }
+
+        // ประมวลผลลอจิกเมื่อใช้มือลากไอเทม (AR Interaction)
+        function processARInteraction() {
+            if (gameState !== 'playing') return;
+
+            // ถ้าไม่ได้ลากอะไรอยู่ และทำท่าหนีบ -> ลองจับไอเทม
+            if (!draggedElement && handCursor.isPinching) {
+                // หาว่า Cursor ชี้โดนไอเทมตัวไหนอยู่
+                const items = Array.from(itemSpawnArea.children);
+                for (let item of items) {
+                    const rect = item.getBoundingClientRect();
+                    if (isInsideRect(handCursor.mappedX, handCursor.mappedY, rect)) {
+                        isUsingHand = true;
+                        draggedElement = item;
+                        draggedElement.classList.add('dragging');
+                        
+                        // จับกึ่งกลางไอเทมเสมอสำหรับโหมด AR
+                        dragOffsetX = rect.width / 2;
+                        dragOffsetY = rect.height / 2;
+                        break;
+                    }
+                }
+            }
+
+            // ถ้ากำลังลากด้วยมือ (AR) ให้อัพเดทตำแหน่ง
+            if (draggedElement && isUsingHand) {
+                if (handCursor.isPinching) {
+                    // กำลังหนีบอยู่ เลื่อนไอเทมตามมือ
+                    draggedElement.style.left = (handCursor.mappedX - dragOffsetX) + 'px';
+                    draggedElement.style.top = (handCursor.mappedY - dragOffsetY) + 'px';
+                    checkHoveringBasket(handCursor.mappedX, handCursor.mappedY);
+                } else {
+                    // คลายนิ้ว ปล่อยไอเทม
+                    evaluateDrop(handCursor.mappedX, handCursor.mappedY, draggedElement);
+                    draggedElement = null;
+                    isUsingHand = false;
+                }
+            }
+        }
+
+        // === 6. Rendering (Canvas Draw Loop) ===
+
+        function drawLoop(currentTime) {
+            // คำนวณ FPS
+            frameCount++;
+            if (currentTime - lastFrameTime >= 1000) {
+                fps = frameCount;
+                frameCount = 0;
+                lastFrameTime = currentTime;
+                uiFps.textContent = fps;
+            }
+
+            // ล้าง Canvas
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            // 1. วาดวิดีโอเป็นพื้นหลัง
+            if (latestHandResults && latestHandResults.image) {
+                // วาดภาพจากกล้อง (ภาพดิบ) การกลับด้านทำที่ CSS `transform: scaleX(-1)` แล้ว
+                canvasCtx.drawImage(latestHandResults.image, 0, 0, canvasElement.width, canvasElement.height);
+            }
+
+            // 2. วาด MediaPipe Hand Skeleton แบบ Custom
+            if (latestHandResults && latestHandResults.multiHandLandmarks) {
+                for (const landmarks of latestHandResults.multiHandLandmarks) {
+                    // เราวาดเส้นโครงกระดูกด้วย drawing_utils
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: 'rgba(0, 255, 255, 0.5)', lineWidth: 3});
+                    drawLandmarks(canvasCtx, landmarks, {color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1, radius: 2});
+
+                    // วาดวงกลม Highlight ที่จุด Pinch (ปลายนิ้วชี้)
+                    const indexFinger = landmarks[8];
+                    // สังเกตว่าพิกัดวาด Canvas นี้อ้างอิงภาพดิบ (ยังไม่โดน flip โดย css) 
+                    // ดังนั้นเราใชัค่าดิบ indexFinger.x ได้เลย CSS จะกลับด้านให้ตอน Render
+                    const cx = indexFinger.x * canvasElement.width;
+                    const cy = indexFinger.y * canvasElement.height;
+
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(cx, cy, handCursor.isPinching ? 15 : 25, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = handCursor.isPinching ? 'rgba(74, 222, 128, 0.7)' : 'rgba(96, 165, 250, 0.4)';
+                    canvasCtx.fill();
+                    canvasCtx.lineWidth = 3;
+                    canvasCtx.strokeStyle = 'white';
+                    canvasCtx.stroke();
+                }
+            }
+
+            // 3. วาดและอัพเดท Particles (เอฟเฟกต์พลุ)
+            updateAndDrawParticles();
+
+            // รันลูปต่อไป
+            requestAnimationFrame(drawLoop);
+        }
+
+        // Particle System Logic
+        function createParticles(x, y, color, count) {
+            // สำคัญ: พิกัดที่ส่งมาคือพิกัดหน้าจอ (screen coordinate)
+            // แต่ Canvas ของเราโดน CSS พลิก (scaleX(-1))
+            // ดังนั้นเวลาวาดลง Canvas เราต้องพลิก X กลับ เพื่อให้จุดแสดงผลตรงกับหน้าจอเป๊ะๆ
+            const canvasX = canvasElement.width - x; 
+            const canvasY = y;
+
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x: canvasX,
+                    y: canvasY,
+                    vx: (Math.random() - 0.5) * 15,
+                    vy: (Math.random() - 0.5) * 15,
+                    life: 1.0,
+                    color: color,
+                    size: Math.random() * 8 + 4
+                });
+            }
+        }
+
+        function updateAndDrawParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02; // ลดอายุ
+                p.vy += 0.2; // แรงโน้มถ่วง
+
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                } else {
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(p.x, p.y, p.size * p.life, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = p.color;
+                    canvasCtx.globalAlpha = p.life;
+                    canvasCtx.fill();
+                    canvasCtx.globalAlpha = 1.0;
+                }
+            }
+        }
+
+        // === 7. Initial Events Binding ===
+        document.getElementById('btn-start').addEventListener('click', startGame);
+        document.getElementById('btn-restart').addEventListener('click', startGame);
+
+        // ป้องกันภาพหรือข้อความโดนลากแบบ Native HTML
+        document.ondragstart = () => false;
+
+    </script>
+</body>
+</html>
